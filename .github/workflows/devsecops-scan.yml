@@ -1,0 +1,122 @@
+# Reusable security gate for GitHub Actions.
+# Call it from any repository with `uses: dcasteel11/devsecops-pipeline-templates/.github/workflows/devsecops-scan.yml@main`.
+# Runs secret scanning, SonarQube SAST with a blocking quality gate, and a Sonatype
+# Nexus IQ open source policy evaluation. Any failed gate fails the calling pipeline.
+
+name: devsecops-scan
+
+on:
+  workflow_call:
+    inputs:
+      sonar-project-key:
+        description: SonarQube project key.
+        type: string
+        required: true
+      nexus-iq-application-id:
+        description: Nexus IQ application ID. Leave empty to skip the Nexus IQ stage.
+        type: string
+        default: ""
+      nexus-iq-stage:
+        description: Nexus IQ policy stage (build, stage-release or release).
+        type: string
+        default: build
+      scan-target:
+        description: Path Nexus IQ should scan (lock files, build output or archives).
+        type: string
+        default: .
+      java-version:
+        description: Java version used to run the Nexus IQ CLI.
+        type: string
+        default: "17"
+    secrets:
+      SONAR_TOKEN:
+        required: true
+      SONAR_HOST_URL:
+        required: true
+      NEXUS_IQ_URL:
+        required: false
+      NEXUS_IQ_USERNAME:
+        required: false
+      NEXUS_IQ_PASSWORD:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sast:
+    name: SAST (SonarQube)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # full history for accurate new-code and blame data
+
+      - name: SonarQube scan
+        uses: SonarSource/sonarqube-scan-action@v4
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        with:
+          args: >
+            -Dsonar.projectKey=${{ inputs.sonar-project-key }}
+
+      - name: Enforce quality gate
+        uses: SonarSource/sonarqube-quality-gate-action@v1
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  sca:
+    name: SCA (Nexus IQ)
+    if: inputs.nexus-iq-application-id != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+
+      - name: Download Nexus IQ CLI
+        run: curl -sSfL -o nexus-iq-cli.jar https://download.sonatype.com/clm/scanner/latest.jar
+
+      - name: Policy evaluation
+        env:
+          IQ_URL: ${{ secrets.NEXUS_IQ_URL }}
+          IQ_USER: ${{ secrets.NEXUS_IQ_USERNAME }}
+          IQ_PASS: ${{ secrets.NEXUS_IQ_PASSWORD }}
+          IQ_APP: ${{ inputs.nexus-iq-application-id }}
+          IQ_STAGE: ${{ inputs.nexus-iq-stage }}
+          SCAN_TARGET: ${{ inputs.scan-target }}
+        # The CLI exits non-zero when a policy action is "Fail" for this stage.
+        run: |
+          java -jar nexus-iq-cli.jar \
+            -s "$IQ_URL" \
+            -a "$IQ_USER:$IQ_PASS" \
+            -i "$IQ_APP" \
+            -t "$IQ_STAGE" \
+            -r iq-result.json \
+            "$SCAN_TARGET"
+
+      - name: Upload policy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-iq-result
+          path: iq-result.json
+          if-no-files-found: ignore
