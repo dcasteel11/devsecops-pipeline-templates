@@ -1,0 +1,100 @@
+# Reusable Azure DevOps stage template with the same gates as the GitHub workflow:
+# Gitleaks secret scan, SonarQube SAST with a blocking quality gate, and Nexus IQ SCA.
+#
+# Consume from another repository:
+#   resources:
+#     repositories:
+#       - repository: templates
+#         type: github
+#         name: dcasteel11/devsecops-pipeline-templates
+#         endpoint: github-connection
+#   stages:
+#     - template: azure-devops/devsecops-scan.yml@templates
+#       parameters:
+#         sonarServiceConnection: sonarqube
+#         sonarProjectKey: my-app
+
+parameters:
+  - name: sonarServiceConnection
+    type: string
+  - name: sonarProjectKey
+    type: string
+  - name: nexusIqApplicationId
+    type: string
+    default: ""
+  - name: nexusIqStage
+    type: string
+    default: build
+    values: [build, stage-release, release]
+  - name: scanTarget
+    type: string
+    default: $(Build.SourcesDirectory)
+  - name: vmImage
+    type: string
+    default: ubuntu-latest
+
+stages:
+  - stage: SecurityGates
+    displayName: Security gates
+    jobs:
+      - job: SecretScan
+        displayName: Secret scan (Gitleaks)
+        pool:
+          vmImage: ${{ parameters.vmImage }}
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          - script: |
+              docker run --rm -v "$(Build.SourcesDirectory):/repo" \
+                zricethezav/gitleaks:v8.21.2 detect --source /repo --redact --exit-code 1
+            displayName: Gitleaks
+
+      - job: Sast
+        displayName: SAST (SonarQube)
+        pool:
+          vmImage: ${{ parameters.vmImage }}
+        steps:
+          - checkout: self
+            fetchDepth: 0
+          - task: SonarQubePrepare@7
+            inputs:
+              SonarQube: ${{ parameters.sonarServiceConnection }}
+              scannerMode: cli
+              configMode: manual
+              cliProjectKey: ${{ parameters.sonarProjectKey }}
+              cliSources: .
+              # Block the pipeline until the quality gate is computed and fail on a red gate.
+              extraProperties: |
+                sonar.qualitygate.wait=true
+                sonar.qualitygate.timeout=300
+          - task: SonarQubeAnalyze@7
+          - task: SonarQubePublish@7
+            inputs:
+              pollingTimeoutSec: "300"
+
+      - ${{ if ne(parameters.nexusIqApplicationId, '') }}:
+          - job: Sca
+            displayName: SCA (Nexus IQ)
+            pool:
+              vmImage: ${{ parameters.vmImage }}
+            # Expects a variable group "nexus-iq" with NEXUS_IQ_URL, NEXUS_IQ_USERNAME and secret NEXUS_IQ_PASSWORD.
+            variables:
+              - group: nexus-iq
+            steps:
+              - checkout: self
+              - script: curl -sSfL -o nexus-iq-cli.jar https://download.sonatype.com/clm/scanner/latest.jar
+                displayName: Download Nexus IQ CLI
+              - script: |
+                  java -jar nexus-iq-cli.jar \
+                    -s "$(NEXUS_IQ_URL)" \
+                    -a "$(NEXUS_IQ_USERNAME):$IQ_PASS" \
+                    -i "${{ parameters.nexusIqApplicationId }}" \
+                    -t "${{ parameters.nexusIqStage }}" \
+                    -r "$(Build.ArtifactStagingDirectory)/iq-result.json" \
+                    "${{ parameters.scanTarget }}"
+                displayName: Policy evaluation
+                env:
+                  IQ_PASS: $(NEXUS_IQ_PASSWORD) # secrets must be mapped explicitly
+              - publish: $(Build.ArtifactStagingDirectory)/iq-result.json
+                artifact: nexus-iq-result
+                condition: always()
