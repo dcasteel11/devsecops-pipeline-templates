@@ -1,0 +1,31 @@
+# Example: copy to .github/workflows/security.yml in an application repository.
+name: security
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  devsecops:
+    uses: dcasteel11/devsecops-pipeline-templates/.github/workflows/devsecops-scan.yml@main
+    with:
+      sonar-project-key: my-app
+      nexus-iq-application-id: my-app
+      nexus-iq-stage: build
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      NEXUS_IQ_URL: ${{ secrets.NEXUS_IQ_URL }}
+      NEXUS_IQ_USERNAME: ${{ secrets.NEXUS_IQ_USERNAME }}
+      NEXUS_IQ_PASSWORD: ${{ secrets.NEXUS_IQ_PASSWORD }}
+
+  build:
+    needs: devsecops # nothing builds or deploys until the gates pass
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: echo "build and deploy steps go here"

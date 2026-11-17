@@ -1,0 +1,27 @@
+# Example: azure-pipelines.yml in an application repository.
+trigger:
+  branches:
+    include: [main]
+
+resources:
+  repositories:
+    - repository: templates
+      type: github
+      name: dcasteel11/devsecops-pipeline-templates
+      endpoint: github-connection # GitHub service connection in the Azure DevOps project
+
+stages:
+  - template: azure-devops/devsecops-scan.yml@templates
+    parameters:
+      sonarServiceConnection: sonarqube
+      sonarProjectKey: my-app
+      nexusIqApplicationId: my-app
+
+  - stage: Build
+    dependsOn: SecurityGates # nothing builds or deploys until the gates pass
+    jobs:
+      - job: Build
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - script: echo "build and deploy steps go here"
